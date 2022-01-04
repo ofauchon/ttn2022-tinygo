@@ -4,7 +4,6 @@ package main
 
 import (
 	"device/stm32"
-	"fmt"
 	"machine"
 	"runtime/interrupt"
 	"time"
@@ -31,16 +30,20 @@ func radioIntHandler(intr interrupt.Interrupt) {
 }
 
 func main() {
-	println("# TinyGo STM32WL Lorawan Demo ")
+	println("# TinyGo GNSE Composter Demo ")
 	println("")
-	machine.LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 
-	// shtc3 Init (Power GPIO, I2C0 Bus, Driver)
+	// Init LED
+	machine.LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
+	machine.LED.High()
+
+	// Onboard shtc3 Init (Power GPIO, I2C0 Bus, Driver)
 	machine.SENSOR_EN.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	machine.SENSOR_EN.High()
 	machine.I2C0.Configure(machine.I2CConfig{})
 	sensor := shtc3.New(machine.I2C0)
 
+	// Define Node OOTA settings
 	switch provider := "orange"; provider {
 	case "chirpstack":
 		loraStack.SetOtaa(
@@ -79,7 +82,7 @@ func main() {
 	var radioSwitch rfswitch.CustomSwitch
 	loraRadio.SetRfSwitch(radioSwitch)
 
-	// Check the device is ready
+	// Check the radio is ready
 	state := loraRadio.DetectDevice()
 	if !state {
 		println("sx126x not detected... Aborting")
@@ -112,7 +115,7 @@ func main() {
 
 	loraConnected := false
 
-	// Go routine for Lorawan Join
+	// Go routine for joining Lorawan
 	go func() {
 		for {
 			for !loraConnected {
@@ -143,11 +146,8 @@ func main() {
 		// Get temperature from sensor
 		sensor.WakeUp()
 
+		// Read internal sensor
 		temp, humidity, _ := sensor.ReadTemperatureHumidity()
-		t := fmt.Sprintf("%.2f", float32(temp)/1000)
-		h := fmt.Sprintf("%.2f", float32(humidity)/100)
-		println("Temperature:", t, "°C")
-		println("Humidity", h, "%")
 
 		// Encode payload
 		encoder.Reset()
@@ -155,17 +155,17 @@ func main() {
 		encoder.AddRelativeHumidity(2, float64(humidity)/100)
 		cayBytes := encoder.Bytes()
 
+		// Send payload if connected
 		if loraConnected {
-			// Send to Lorawan network
 			println("lorawan: Sending Cayenne: ", hex.EncodeToString(cayBytes))
 			err := loraStack.LoraSendUplink(cayBytes)
 			if err != nil {
 				println(err)
 			}
-
 		} else {
-			println("main: Lorawan not connected")
+			println("main: Waiting for Lorawan connectivity")
 		}
+		// Go to sleep
 		println("Sleep 180s")
 		time.Sleep(180 * time.Second)
 	}
