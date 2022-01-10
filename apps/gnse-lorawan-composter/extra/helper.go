@@ -30,7 +30,7 @@ func BytesToHexString(data []byte) string {
 	return s
 }
 
-//
+// GetRand16 returns 2 random bytes
 func GetRand16() [2]uint8 {
 	randomBytes := make([]byte, 2)
 	_, err := rand.Read(randomBytes)

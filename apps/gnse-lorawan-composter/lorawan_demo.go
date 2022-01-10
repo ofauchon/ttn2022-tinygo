@@ -1,6 +1,6 @@
 package main
 
-// In this example, we will join TTN Network and send a sample packet every 180s
+// Lorawan composter application for TTC 2022
 
 import (
 	"device/stm32"
@@ -14,13 +14,16 @@ import (
 	rfswitch "./rfswitch"
 	cayennelpp "github.com/TheThingsNetwork/go-cayenne-lib"
 	"github.com/ofauchon/go-lorawan-stack"
+	"tinygo.org/x/drivers/sht3x"
 	"tinygo.org/x/drivers/shtc3"
 	"tinygo.org/x/drivers/sx126x"
 )
 
+// Globals
 var (
-	loraRadio *sx126x.Device
-	loraStack lorawan.LoraWanStack
+	loraRadio     *sx126x.Device
+	loraStack     lorawan.LoraWanStack
+	loraConnected bool
 )
 
 // Handle sx126x interrupts
@@ -29,21 +32,54 @@ func radioIntHandler(intr interrupt.Interrupt) {
 
 }
 
+// This will keep us connected
+func loraConnect() {
+	for {
+		for !loraConnected {
+			err := loraStack.LoraWanJoin()
+			if err != nil {
+				println("main:Error joining Lorawan:", err, ", will wait 300 sec")
+				time.Sleep(time.Second * 300)
+			} else {
+				println("main: Lorawan connection established")
+				loraConnected = true
+			}
+		}
+		// We are connected
+		if loraConnected {
+			machine.LED.Set(!machine.LED.Get())
+		}
+		time.Sleep(time.Second * 3)
+	}
+}
+
 func main() {
-	println("# TinyGo GNSE Composter Demo ")
-	println("")
+	println("***** TinyGo GNSE Composter Demo ****")
+	println("***** Olivier Fauchon            ****")
 
-	// Init LED
+	// Configure LED GPIO
 	machine.LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	machine.LED.High()
+	for i := 0; i < 3; i++ {
+		machine.LED.Low()
+		time.Sleep(time.Millisecond * 250)
+		machine.LED.High()
+		time.Sleep(time.Millisecond * 250)
+	}
 
-	// Onboard shtc3 Init (Power GPIO, I2C0 Bus, Driver)
+	// Enable I2C1 for embedded SHTC3 sensor.
+	machine.I2C1.Configure(machine.I2CConfig{SCL: machine.I2C1_SCL_PIN, SDA: machine.I2C1_SDA_PIN})
+	sensor1 := shtc3.New(machine.I2C1)
+
+	// Enable I2C2 for external SHT3X sensor (QWIIC)
+	machine.I2C2.Configure(machine.I2CConfig{SCL: machine.I2C2_SCL_PIN, SDA: machine.I2C2_SDA_PIN})
+	sensor2 := sht3x.New(machine.I2C2)
+
+	// Configure GPIO for sensor power
 	machine.SENSOR_EN.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	machine.SENSOR_EN.High()
-	machine.I2C0.Configure(machine.I2CConfig{})
-	sensor := shtc3.New(machine.I2C0)
 
-	// Define Node OOTA settings
+	// Define OOTA settings
+	// Temporary keys
 	switch provider := "orange"; provider {
 	case "chirpstack":
 		loraStack.SetOtaa(
@@ -65,29 +101,27 @@ func main() {
 		)
 
 	}
-	println("APPEUI:", hex.EncodeToString(loraStack.Otaa.AppEUI[:]))
-	println("APPEUI:", hex.EncodeToString(loraStack.Otaa.DevEUI[:]))
-	println("APPKEY", hex.EncodeToString(loraStack.Otaa.AppKey[:]))
+	println("main: APPEUI:", hex.EncodeToString(loraStack.Otaa.AppEUI[:]))
+	println("main: DEVEUI:", hex.EncodeToString(loraStack.Otaa.DevEUI[:]))
+	println("main: APPKEY", hex.EncodeToString(loraStack.Otaa.AppKey[:]))
 
-	// Initialize DevNonce with TRNG
+	// Initialize DevNonce
 	rnd := extra.GetRand16()
 	loraStack.Otaa.DevNonce[0] = rnd[0]
 	loraStack.Otaa.DevNonce[1] = rnd[1]
 
-	// Driver for SX126x device on SubGhzSPI (SPI3)
+	// SX126x driver on SubGhzSPI (SPI3)
 	loraRadio = sx126x.New(machine.SPI3)
 	loraRadio.SetDeviceType(sx126x.DEVICE_TYPE_SX1262)
 
-	// Create RF Switch
+	// Most boards have an RF FrontEnd Switch
 	var radioSwitch rfswitch.CustomSwitch
 	loraRadio.SetRfSwitch(radioSwitch)
 
 	// Check the radio is ready
 	state := loraRadio.DetectDevice()
 	if !state {
-		println("sx126x not detected... Aborting")
-		for {
-		}
+		panic("main: sx126x not detected... Aborting")
 	}
 
 	// Attach the Lora Radio to LoraStack
@@ -113,60 +147,45 @@ func main() {
 	}
 	loraRadio.LoraConfig(loraConf)
 
-	loraConnected := false
+	// Go routine for keeping us connected to Lorawan
+	go loraConnect()
 
-	// Go routine for joining Lorawan
-	go func() {
-		for {
-			for !loraConnected {
-				err := loraStack.LoraWanJoin()
-				if err != nil {
-					println("Error joining: ", err, ",wait 300 sec")
-					time.Sleep(time.Second * 300)
-				} else {
-					loraConnected = true
-				}
-			}
-			// We are connected
-			println("Lorawan connection state:", loraConnected)
-			if loraConnected {
-				machine.LED.Set(!machine.LED.Get())
-			}
-			time.Sleep(time.Second * 3)
-		}
-	}()
+	// Wait 10 sec to give a chance to get a Lorawan connexion
+	time.Sleep(time.Second * 20)
 
-	// Wait 10 sec to give a chance to Lorawan connexion
-	time.Sleep(time.Second * 10)
-
+	// We'll encode with Cayenne LPP protocol
 	encoder := cayennelpp.NewEncoder()
-	// main loop
+
 	for {
 
-		// Get temperature from sensor
-		sensor.WakeUp()
+		// Probe External SHT3X Sensor (Has to be probe first !)
+		temp2, humi2, _ := sensor2.ReadTemperatureHumidity()
+		println("main: Compost:", temp2, "°C", humi2, "%")
 
-		// Read internal sensor
-		temp, humidity, _ := sensor.ReadTemperatureHumidity()
+		// WakeUp and probe onboard SHTC3 sensor
+		sensor1.WakeUp()
+		temp1, humi1, _ := sensor1.ReadTemperatureHumidity()
+		println("main: External:", temp1, "°C", humi1, "%")
 
-		// Encode payload
+		// Encode payload of Int/Ext sensors
 		encoder.Reset()
-		encoder.AddTemperature(1, float64(temp)/1000)
-		encoder.AddRelativeHumidity(2, float64(humidity)/100)
+		encoder.AddTemperature(1, float64(temp1)/1000)
+		encoder.AddRelativeHumidity(2, float64(humi1)/100)
+		encoder.AddTemperature(1, float64(temp2)/1000)
+		encoder.AddRelativeHumidity(2, float64(humi2)/100)
 		cayBytes := encoder.Bytes()
 
 		// Send payload if connected
 		if loraConnected {
-			println("lorawan: Sending Cayenne: ", hex.EncodeToString(cayBytes))
+			println("main: Sending LPP payload: ", hex.EncodeToString(cayBytes))
 			err := loraStack.LoraSendUplink(cayBytes)
 			if err != nil {
 				println(err)
 			}
-		} else {
-			println("main: Waiting for Lorawan connectivity")
 		}
-		// Go to sleep
-		println("Sleep 180s")
+
+		// Sleep
+		println("main: Sleep 180s")
 		time.Sleep(180 * time.Second)
 	}
 
